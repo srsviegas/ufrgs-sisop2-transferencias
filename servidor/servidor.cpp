@@ -1,133 +1,177 @@
 #include <iostream>
 #include <string>
 #include <map>
-#include <vector>
-#include <cstring> // Para memset
-
-// Cabeçalhos padrão para Sockets em Linux
+#include <cstring>
+#include <algorithm>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <unistd.h> // Para a função close()
+#include <unistd.h>
+#include <sys/select.h> 
+#include <thread> 
+#include <mutex>  
 
-const int TAMANHO_BUFFER = 1024;
+#define portaServico 9999 //Porta fixa do serviço PIX
 
 using namespace std;
 
-int main(int argc, char *argv[]){
-    // Valida se a porta foi passada como argumento
-    if(argc != 2){
-        cerr << "Uso: " << argv[0] << " <porta>" << endl;
-        return 1;
-    }
+const int TAMANHO_BUFFER = 1024;
+const string DISCOVERY_MSG = "PIX_SERVER_DISCOVERY_REQUEST";
 
-    int porta;
-    try{
-        porta = stoi(argv[1]);
-        if(porta <= 1024 || porta > 65535){
-             cerr << "Aviso: A porta deve ser um numero entre 1025 e 65535. Portas baixas requerem privilegios de root." << endl;
+map<string, double> saldoClientes; //Banco de dados dos clientes (mudar)
+mutex saldosMutex; //Mutex para proteger o acesso aos dados dos clientes    
+
+string processarRequisicao(string ipRemetente, string mensagem){
+
+    lock_guard<mutex> lock(saldosMutex);
+
+    string resposta;
+    size_t pos = mensagem.find(':');
+
+    if(pos == string::npos){
+        resposta = "ERRO: Formato da mensagem invalido. Use <IP_DESTINO> <VALOR>";
+    }else{
+        string ipDestino = mensagem.substr(0, pos);
+        try{
+            double valor = stod(mensagem.substr(pos + 1));
+            //Consulta de Saldo
+            if(valor == 0){
+                cout << ">>> [Thread] Consultando saldo para: " << ipDestino << endl;
+                if(saldoClientes.find(ipDestino) == saldoClientes.end()){
+                    resposta = "ERRO: Conta " + ipDestino + " nao encontrada.";
+                }else{
+                    string saldoStr = to_string(saldoClientes[ipDestino]);
+                    resposta = "SALDO de " + ipDestino + ": R$ " + saldoStr.substr(0, saldoStr.find('.') + 3);
+                }
+            }
+            //Transação Pix
+            else{
+                if(saldoClientes.find(ipRemetente) == saldoClientes.end()){
+                    resposta = "ERRO: Conta do remetente nao foi encontrada.";
+                }else if(saldoClientes.find(ipDestino) == saldoClientes.end()){
+                    resposta = "ERRO: O destinatario nao e um cliente valido.";
+                }else if(valor < 0){
+                    resposta = "ERRO: O valor da transferencia deve ser positivo.";
+                }else if(saldoClientes[ipRemetente] < valor){
+                    resposta = "ERRO: Saldo insuficiente.";
+                }else if(ipRemetente == ipDestino){
+                    resposta = "ERRO: Nao suportamos self-pix.";
+                }else{
+                    saldoClientes[ipRemetente] -= valor;
+                    saldoClientes[ipDestino] += valor;
+                    resposta = "Transferencia realizada. Seu novo saldo: " + to_string(saldoClientes[ipRemetente]);
+                    cout << ">>> [Thread] Transacao processada: " << ipRemetente << " -> " << ipDestino << "(R$ " << valor << ")" << endl;
+                }
+            }
+        }catch(const invalid_argument& e){
+            resposta = "ERRO: Valor invalido.";
         }
-    }catch(const invalid_argument& e){
-        cerr << "Erro: Porta invalida. Forneca um numero." << endl;
-        return 1;
+    }
+    return resposta;
+}
+
+//Função executada pela thread de descoberta
+//Registra clientes novos e responde com a porta do serviço
+void handle_discovery(int discoverySocket, struct sockaddr_in clientAddr, string clientIP, int servicePort){
+    cout << ">>> [Thread] Mensagem de descoberta recebida de: " << clientIP << endl;
+
+   {
+        lock_guard<mutex> lock(saldosMutex);
+        if(saldoClientes.find(clientIP) == saldoClientes.end()){
+            saldoClientes[clientIP] = 100.00;
+            cout << "    [Thread] Novo cliente registrado! Saldo inicial: R$ 100.00" << endl;
+        }
     }
 
-    // Simulação de um banco de dados de clientes(IP -> Saldo)
-    map<string, double> saldosClientes;
-    saldosClientes["127.0.0.1"] = 1000.00; // Cliente local 1
-    saldosClientes["192.168.0.10"] = 500.50;  // Exemplo de outro cliente na rede
-    saldosClientes["192.168.0.11"] = 250.00;  // Exemplo de outro cliente na rede
+    //Responde com a porta de serviço
+    string portaResposta = to_string(servicePort);
+    sendto(discoverySocket, portaResposta.c_str(), portaResposta.length(), 0,(struct sockaddr *)&clientAddr, sizeof(clientAddr)); 
+}
 
-    int servidorSocket;
-    struct sockaddr_in infoServidor, infoCliente;
+//Geerencia as requisições PIX e envia respostas
+void handle_pix(int serviceSocket, struct sockaddr_in clientAddr, string clientIP, string message){
+    cout << "\n>>> [Thread] Recebida requisicao PIX de " << clientIP << ": " << message << endl;
+    //Chama a função de processamento(que já tem seu próprio mutex)
+    string resposta = processarRequisicao(clientIP, message);
+    //Envia a resposta de volta ao cliente
+    sendto(serviceSocket, resposta.c_str(), resposta.length(), 0,(struct sockaddr *)&clientAddr, sizeof(clientAddr));
+}
+
+int main(int argc, char *argv[]){
+    if(argc != 2){
+        cerr << "Uso: " << argv[0] << " <porta_descoberta>" << endl;
+        return 1;
+    }
+    int portaDescoberta = stoi(argv[1]);
+
+    int serviceSocket, discoverySocket;
+    struct sockaddr_in infoServico, infoDiscovery, infoCliente;
     char buffer[TAMANHO_BUFFER];
 
-    // 1. Criar o socket UDP
-    if((servidorSocket = socket(AF_INET, SOCK_DGRAM, 0)) == -1){
-        cerr << "Nao foi possivel criar o socket." << endl;
-        return 1;
-    }
-    cout << "Socket UDP criado com sucesso." << endl;
+    //Configuração dos sockets de descoberta 
+    discoverySocket = socket(AF_INET, SOCK_DGRAM, 0);
+    infoDiscovery.sin_family = AF_INET;
+    infoDiscovery.sin_addr.s_addr = INADDR_ANY;
+    infoDiscovery.sin_port = htons(portaDescoberta);
+    bind(discoverySocket,(struct sockaddr *)&infoDiscovery, sizeof(infoDiscovery));
 
-    // 2. Preparar a estrutura sockaddr_in
-    infoServidor.sin_family = AF_INET;
-    infoServidor.sin_addr.s_addr = INADDR_ANY; // Aceita conexões de qualquer IP
-    infoServidor.sin_port = htons(porta);
+    //Configuração do socket de serviço
+    serviceSocket = socket(AF_INET, SOCK_DGRAM, 0);
+    infoServico.sin_family = AF_INET;
+    infoServico.sin_addr.s_addr = INADDR_ANY;
+    infoServico.sin_port = htons(portaServico);
+    bind(serviceSocket,(struct sockaddr *)&infoServico, sizeof(infoServico));
 
-    // 3. Fazer o bind do socket à porta e endereço
-    if(bind(servidorSocket,(struct sockaddr *)&infoServidor, sizeof(infoServidor)) == -1){
-        cerr << "Bind falhou." << endl;
-        close(servidorSocket);
-        return 1;
-    }
-    cout << "Bind realizado na porta " << porta << endl;
-    cout << "Servidor aguardando transacoes..." << endl;
+    cout << "[Main] Servidor de Descoberta rodando na porta " << portaDescoberta << endl;
+    cout << "[Main] Servidor PIX aguardando requisicoes na porta " << portaServico << endl;
 
-    // 4. Loop principal para receber mensagens
+    fd_set readfds;
+    int max_sd = max(serviceSocket, discoverySocket);
+
     while(true){
-        socklen_t tamanhoInfoCliente = sizeof(infoCliente);
-        ssize_t bytesRecebidos;
+        FD_ZERO(&readfds);
+        FD_SET(serviceSocket, &readfds);
+        FD_SET(discoverySocket, &readfds);
 
-        // Limpa o buffer
-        memset(buffer, 0, TAMANHO_BUFFER);
+        select(max_sd + 1, &readfds, NULL, NULL, NULL); 
 
-        // Recebe dados do cliente(chamada bloqueante)
-        bytesRecebidos = recvfrom(servidorSocket, buffer, TAMANHO_BUFFER, 0,(struct sockaddr *)&infoCliente, &tamanhoInfoCliente);
-        if(bytesRecebidos == -1){
-            cerr << "recvfrom falhou." << endl;
-            continue;
-        }
+        //Socket de descoberta
+        if(FD_ISSET(discoverySocket, &readfds)){
+            socklen_t len = sizeof(infoCliente);
+            memset(buffer, 0, TAMANHO_BUFFER);
+            ssize_t bytes = recvfrom(discoverySocket, buffer, TAMANHO_BUFFER, 0,(struct sockaddr *)&infoCliente, &len);
+            
+            if(bytes > 0 && string(buffer) == DISCOVERY_MSG){
+                //Copia as informações para a thread
+                struct sockaddr_in clientAddr_copy = infoCliente; 
+                char ipCliente[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &infoCliente.sin_addr, ipCliente, INET_ADDRSTRLEN);
+                string ipClienteStr(ipCliente);
 
-        // Obtém o IP do remetente
-        char ipRemetente[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &infoCliente.sin_addr, ipRemetente, INET_ADDRSTRLEN);
-        string ipRemetenteStr(ipRemetente);
-
-        buffer[bytesRecebidos] = '\0'; // Adiciona terminador nulo para segurança
-        cout << "\nRecebido de " << ipRemetenteStr << ": " << buffer << endl;
-
-        // Processa a mensagem: "IP_DESTINO:VALOR"
-        string mensagem(buffer);
-        string resposta;
-        size_t pos = mensagem.find(':');
-
-        if(pos == string::npos){
-            resposta = "ERRO: Formato da mensagem invalido. Use IP_DESTINO:VALOR";
-        }else{
-            string ipDestino = mensagem.substr(0, pos);
-            try{
-                double valor = stod(mensagem.substr(pos + 1));
-
-                // Validação da transação
-                if(saldosClientes.find(ipRemetenteStr) == saldosClientes.end()){
-                    resposta = "ERRO: Voce nao e um cliente registrado.";
-                }else if(saldosClientes.find(ipDestino) == saldosClientes.end()){
-                    resposta = "ERRO: O destinatario nao e um cliente valido.";
-                }else if(valor <= 0){
-                    resposta = "ERRO: O valor da transferencia deve ser positivo.";
-                }else if(saldosClientes[ipRemetenteStr] < valor){
-                    resposta = "ERRO: Saldo insuficiente.";
-                }else if(ipRemetenteStr == ipDestino){
-                    resposta = "ERRO: Nao e possivel enviar Pix para si mesmo.";
-                }else{
-                    // Transação Válida!
-                    saldosClientes[ipRemetenteStr] -= valor;
-                    saldosClientes[ipDestino] += valor;
-                    resposta = "SUCESSO: Transferencia realizada. Seu novo saldo: " + to_string(saldosClientes[ipRemetenteStr]);
-                    
-                    cout << ">>> Transacao processada: " << ipRemetenteStr << " -> " << ipDestino << "(R$ " << valor << ")" << endl;
-                    cout << "    Novo saldo de " << ipRemetenteStr << ": R$ " << saldosClientes[ipRemetenteStr] << endl;
-                    cout << "    Novo saldo de " << ipDestino << ": R$ " << saldosClientes[ipDestino] << endl;
-                }
-            }catch(const invalid_argument& e){
-                resposta = "ERRO: Valor da transferencia invalido.";
+                //Cria thread para tratar da descoberta
+                thread(handle_discovery, discoverySocket, clientAddr_copy, ipClienteStr, portaServico).detach();
             }
         }
+        //Socket de serviços
+        if(FD_ISSET(serviceSocket, &readfds)){
+            socklen_t len = sizeof(infoCliente);
+            memset(buffer, 0, TAMANHO_BUFFER);
+            ssize_t bytes = recvfrom(serviceSocket, buffer, TAMANHO_BUFFER, 0,(struct sockaddr *)&infoCliente, &len);
 
-        // Envia a resposta de volta ao cliente
-        sendto(servidorSocket, resposta.c_str(), resposta.length(), 0,(struct sockaddr *)&infoCliente, tamanhoInfoCliente);
+            if(bytes > 0){
+                //Copia as informações para a thread
+                struct sockaddr_in clientAddr_copy = infoCliente;
+                char ipRemetente[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &infoCliente.sin_addr, ipRemetente, INET_ADDRSTRLEN);
+                string ipRemetenteStr(ipRemetente);
+                string msg(buffer);
+
+                //Cria thread para tratar da requisição PIX
+                thread(handle_pix, serviceSocket, clientAddr_copy, ipRemetenteStr, msg).detach();
+            }
+        }
     }
-
-    close(servidorSocket);
+    close(serviceSocket);
+    close(discoverySocket);
     return 0;
 }
