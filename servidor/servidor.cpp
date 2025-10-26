@@ -10,6 +10,8 @@
 #include <sys/select.h> 
 #include <thread> 
 #include <mutex>  
+#include <iomanip>
+#include <sstream>
 
 #define portaServico 9999 //Porta fixa do serviço PIX
 
@@ -19,7 +21,26 @@ const int TAMANHO_BUFFER = 1024;
 const string DISCOVERY_MSG = "PIX_SERVER_DISCOVERY_REQUEST";
 
 map<string, double> saldoClientes; //Banco de dados dos clientes (mudar)
+map<string, int> requisicoesPorCliente;
+
 mutex saldosMutex; //Mutex para proteger o acesso aos dados dos clientes    
+int numTransactions = 0;
+double totalTransferred = 0.0;
+double totalBalance = 0.0;
+mutex statsMutex;
+
+double calcularSaldoTotalBanco() {
+    double soma = 0.0;
+    for (auto &par : saldoClientes) soma += par.second;
+    return soma;
+}
+
+string getDataHoraAtual() {
+    time_t agora = time(nullptr);
+    char bufferTempo[20];
+    strftime(bufferTempo, sizeof(bufferTempo), "%Y-%m-%d %H:%M:%S", localtime(&agora));
+    return string(bufferTempo);
+}
 
 string processarRequisicao(string ipRemetente, string mensagem){
 
@@ -59,8 +80,35 @@ string processarRequisicao(string ipRemetente, string mensagem){
                 }else{
                     saldoClientes[ipRemetente] -= valor;
                     saldoClientes[ipDestino] += valor;
-                    resposta = "Transferencia realizada. Seu novo saldo: " + to_string(saldoClientes[ipRemetente]);
-                    cout << ">>> [Thread] Transacao processada: " << ipRemetente << " -> " << ipDestino << "(R$ " << valor << ")" << endl;
+                    //resposta = "Transferencia realizada. Seu novo saldo: " + to_string(saldoClientes[ipRemetente]);
+                    //cout << ">>> [Thread] Transacao processada: " << ipRemetente << " -> " << ipDestino << "(R$ " << valor << ")" << endl;
+                    int reqCliente;
+                    {
+                        lock_guard<mutex> lock2(statsMutex);
+                        requisicoesPorCliente[ipRemetente]++;
+                        reqCliente = requisicoesPorCliente[ipRemetente];
+                        numTransactions++;
+                        totalTransferred += valor;
+                        totalBalance = calcularSaldoTotalBanco();
+                    }
+
+                    {
+                        lock_guard<mutex> lockPrint(statsMutex);
+                        cout << getDataHoraAtual()
+                             << " client " << ipRemetente
+                             << " id_req " << reqCliente
+                             << " dest " << ipDestino
+                             << " value " << fixed << setprecision(2) << valor << endl
+                             << "num_transactions " << numTransactions << endl
+                             << "total_transferred " << fixed << setprecision(2) << totalTransferred
+                             << " total_balance " << fixed << setprecision(2) << totalBalance
+                             << endl;
+                    }
+
+                    ostringstream string_builder;
+                    string_builder << fixed << setprecision(2);
+                    string_builder << "new balance " << saldoClientes[ipRemetente];
+                    resposta = string_builder.str();
                 }
             }
         }catch(const invalid_argument& e){
@@ -90,7 +138,7 @@ void handle_discovery(int discoverySocket, struct sockaddr_in clientAddr, string
 
 //Geerencia as requisições PIX e envia respostas
 void handle_pix(int serviceSocket, struct sockaddr_in clientAddr, string clientIP, string message){
-    cout << "\n>>> [Thread] Recebida requisicao PIX de " << clientIP << ": " << message << endl;
+    //cout << "\n>>> [Thread] Recebida requisicao PIX de " << clientIP << ": " << message << endl;
     //Chama a função de processamento(que já tem seu próprio mutex)
     string resposta = processarRequisicao(clientIP, message);
     //Envia a resposta de volta ao cliente
@@ -124,6 +172,10 @@ int main(int argc, char *argv[]){
 
     cout << "[Main] Servidor de Descoberta rodando na porta " << portaDescoberta << endl;
     cout << "[Main] Servidor PIX aguardando requisicoes na porta " << portaServico << endl;
+
+    cout << getDataHoraAtual() 
+         << " num transactions 0 total transferred 0 total balance 0" 
+         << endl;
 
     fd_set readfds;
     int max_sd = max(serviceSocket, discoverySocket);
