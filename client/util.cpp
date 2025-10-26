@@ -2,9 +2,11 @@
 #include <signal.h>
 #include <ctime>
 #include <arpa/inet.h>
+#include <atomic>
 
 #include "util.hpp"
 
+std::atomic<bool> running = true;
 
 std::string timestamp() {
     char buf[64];
@@ -16,7 +18,7 @@ std::string timestamp() {
 void signal_handler(int signum) {
     if (signum == SIGINT || signum == SIGTERM) {
         // TODO: send EXIT to server before exiting
-        exit(EXIT_SUCCESS);
+        running.store(false);
     }
 }
 
