@@ -43,14 +43,8 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, signal_handler);
 
     std::thread input_thread([&]() {
-        while (running.load()) {
-            std::string line;
-            if (!std::getline(std::cin, line)) {
-                running.store(false);
-                queue_cv.notify_all();
-                break;
-            }
-
+        std::string line;
+        while (running.load() && std::getline(std::cin, line)) {
             if (line.empty()) {
                 continue;
             }
@@ -75,7 +69,7 @@ int main(int argc, char* argv[]) {
     });
 
     std::thread request_thread([&]() {
-        while (running.load()) {
+        while (running.load() || !request_queue.empty()) {
             request req;
             {
                 std::unique_lock<std::mutex> lock(queue_mutex);
@@ -114,6 +108,9 @@ int main(int argc, char* argv[]) {
     running.store(false);
     queue_cv.notify_all();
     request_thread.join();
+
+    send_exit_request(request_socket, server_ip, server_port);
+
     close(request_socket);
 
     return 0;

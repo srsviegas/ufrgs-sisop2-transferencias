@@ -17,7 +17,6 @@ std::string timestamp() {
 
 void signal_handler(int signum) {
     if (signum == SIGINT || signum == SIGTERM) {
-        // TODO: send EXIT to server before exiting
         running.store(false);
     }
 }

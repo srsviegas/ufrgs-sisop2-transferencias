@@ -9,6 +9,13 @@
 #include "request.hpp"
 #include "util.hpp"
 
+bool send_exit_request(int socket, uint32_t server_ip, uint16_t server_port) {
+    request exit_request{ 1, 0 };  // dest_addr = 1 for EXIT
+    request_ack ack{};
+
+    return send_request_with_retry(socket, server_ip, server_port, exit_request, ack);
+}
+
 bool send_request_with_retry(int socket, uint32_t server_ip, uint16_t server_port, const request& req, request_ack& ack_out) {
     for (int attempt = 0; attempt < REQUEST_MAX_RETRIES; attempt++) {
         uint32_t seqn = send_request(socket, server_ip, server_port, req);

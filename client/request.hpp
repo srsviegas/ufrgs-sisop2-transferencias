@@ -36,6 +36,7 @@ typedef struct __packet {
 
 /* Request functions */
 
+bool send_exit_request(int socket, uint32_t server_ip, uint16_t server_port);
 bool send_request_with_retry(int socket, uint32_t server_ip, uint16_t server_port, const request& req, request_ack& ack_out);
 uint32_t send_request(int socket, uint32_t server_ip, uint16_t server_port, const request& req);
 bool receive_request_ack(int socket, uint32_t expected_seqn, request_ack& ack);
