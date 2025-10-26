@@ -11,6 +11,8 @@
 
 #define DISCOVERY_TIMEOUT_MS 5000
 #define REQUEST_ACK_TIMEOUT_MS 5000
+#define REQUEST_MAX_RETRIES 3
+#define REQUEST_RETRY_DELAY_MS 1000
 
 struct request {
     uint32_t dest_addr;     // Destination address
@@ -34,5 +36,6 @@ typedef struct __packet {
 
 /* Request functions */
 
-uint32_t send_request(uint32_t server_ip, uint16_t server_port, const request& req);
-bool receive_request_ack(uint32_t expected_seqn, request_ack& ack);
+bool send_request_with_retry(int socket, uint32_t server_ip, uint16_t server_port, const request& req, request_ack& ack_out);
+uint32_t send_request(int socket, uint32_t server_ip, uint16_t server_port, const request& req);
+bool receive_request_ack(int socket, uint32_t expected_seqn, request_ack& ack);

@@ -10,13 +10,13 @@
 
 uint32_t discover_server(uint16_t port) {
     int broadcast = 1;
-    int discovery_socket = socket(AF_INET, SOCK_DGRAM, 0);
+    int discovery_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (discovery_socket < 0) {
-        perror("socket");
+        fprintf(stderr, "%s Failed to create discovery socket.\n", timestamp().c_str());
         return 0;
     }
     if (setsockopt(discovery_socket, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast)) < 0) {
-        perror("setsockopt");
+        fprintf(stderr, "%s Failed to set socket options.\n", timestamp().c_str());
         close(discovery_socket);
         return 0;
     }
@@ -40,7 +40,7 @@ uint32_t discover_server(uint16_t port) {
     tv.tv_sec = DISCOVERY_TIMEOUT_MS / 1000;
     tv.tv_usec = (DISCOVERY_TIMEOUT_MS % 1000) * 1000;
     if (setsockopt(discovery_socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == -1) {
-        perror("setsockopt failed");
+        fprintf(stderr, "%s Failed to set socket options.\n", timestamp().c_str());
         close(discovery_socket);
         return 0;
     }
