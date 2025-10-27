@@ -12,63 +12,65 @@
 #include <mutex>  
 
 #include "../client/request.hpp"
-
-#define portaServico 9999 //Porta fixa do serviço PIX
+#include "util.hpp"
 
 using namespace std;
 
-const int TAMANHO_BUFFER = 1024;
+struct Cliente {
+    string ip;
+    u_int32_t saldo;
+    int last_req;
+};
 
-map<string, double> saldoClientes; //Banco de dados dos clientes (mudar)
+int num_transactions = 0;
+int total_transferred = 0;
+int total_balance = 0;
+
+map<string, Cliente> ClientesDB; //Banco de dados dos clientes (mudar)
 mutex saldosMutex; //Mutex para proteger o acesso aos dados dos clientes    
 
-string processarRequisicao(string ipRemetente, string mensagem){
-
-    lock_guard<mutex> lock(saldosMutex);
+void processarRequisicao(u_int32_t value, string ipRemetente, string ipDestino){
 
     string resposta;
-    size_t pos = mensagem.find(':');
-
-    if(pos == string::npos){
-        resposta = "ERRO: Formato da mensagem invalido. Use <IP_DESTINO> <VALOR>";
-    }else{
-        string ipDestino = mensagem.substr(0, pos);
-        try{
-            double valor = stod(mensagem.substr(pos + 1));
-            //Consulta de Saldo
-            if(valor == 0){
-                cout << ">>> [Thread] Consultando saldo para: " << ipDestino << endl;
-                if(saldoClientes.find(ipDestino) == saldoClientes.end()){
-                    resposta = "ERRO: Conta " + ipDestino + " nao encontrada.";
-                }else{
-                    string saldoStr = to_string(saldoClientes[ipDestino]);
-                    resposta = "SALDO de " + ipDestino + ": R$ " + saldoStr.substr(0, saldoStr.find('.') + 3);
-                }
-            }
-            //Transação Pix
-            else{
-                if(saldoClientes.find(ipRemetente) == saldoClientes.end()){
-                    resposta = "ERRO: Conta do remetente nao foi encontrada.";
-                }else if(saldoClientes.find(ipDestino) == saldoClientes.end()){
-                    resposta = "ERRO: O destinatario nao e um cliente valido.";
-                }else if(valor < 0){
-                    resposta = "ERRO: O valor da transferencia deve ser positivo.";
-                }else if(saldoClientes[ipRemetente] < valor){
-                    resposta = "ERRO: Saldo insuficiente.";
-                }else if(ipRemetente == ipDestino){
-                    resposta = "ERRO: Nao suportamos self-pix.";
-                }else{
-                    saldoClientes[ipRemetente] -= valor;
-                    saldoClientes[ipDestino] += valor;
-                    resposta = "Transferencia realizada. Seu novo saldo: " + to_string(saldoClientes[ipRemetente]);
-                    cout << ">>> [Thread] Transacao processada: " << ipRemetente << " -> " << ipDestino << "(R$ " << valor << ")" << endl;
-                }
-            }
-        }catch(const invalid_argument& e){
-            resposta = "ERRO: Valor invalido.";
+    lock_guard<mutex> lock(saldosMutex);
+    if(value == 0){
+        cout << ">>> [Thread] Consultando saldo para: " << ipDestino << endl;
+        if(ClientesDB.find(ipDestino) == ClientesDB.end()){
+            resposta = "ERRO: Conta " + ipDestino + " nao encontrada.";
+            cout << ">>> [Thread] " << resposta << endl;
+            return;
+        }else{
+            string saldoStr = to_string(ClientesDB[ipDestino].saldo);
+            resposta = "SALDO de " + ipDestino + ": R$ " + saldoStr;
+            cout << ">>> [Thread] " << resposta << endl;
         }
     }
-    return resposta;
+    //Transação Pix
+    else{
+        if(ClientesDB.find(ipDestino) == ClientesDB.end()){
+            resposta = "ERRO: O destinatario nao e um cliente valido.";
+            cout << ">>> [Thread] " << resposta << endl;
+            return;
+        }else if(ClientesDB[ipRemetente].saldo < value){
+            resposta = "ERRO: Saldo insuficiente.";
+            cout << ">>> [Thread] " << resposta << endl;
+            return;
+        }else if(ipRemetente == ipDestino){
+            resposta = "ERRO: Nao suportamos self-pix.";
+            cout << ">>> [Thread] " << resposta << endl;
+            return;
+        }else{
+            ClientesDB[ipRemetente].saldo -= value;
+            ClientesDB[ipDestino].saldo += value;
+            ClientesDB[ipRemetente].last_req += 1;
+            total_transferred += value;
+            for(const auto& cliente : ClientesDB){
+                total_balance += cliente.second.saldo;
+            }
+            num_transactions += 1;
+            cout << "[Thread] Transacao processada: " << ipRemetente << " -> " << ipDestino << "(R$ " << value << ")" << endl;
+        }
+    }    
 }
 
 //Função executada pela thread de descoberta
@@ -77,16 +79,50 @@ void handle_discovery(int discoverySocket, struct sockaddr_in clientAddr, uint32
     packet_t resposta{};
     resposta.seqn = seqn;
     resposta.type = PACKET_TYPE_DISCOVERY_ACK;
+
+    string ipCliente = inet_ntoa(clientAddr.sin_addr);
+    {
+        lock_guard<mutex> lock(saldosMutex);
+        if(ClientesDB.find(ipCliente) == ClientesDB.end()){
+            Cliente novoCliente;
+            novoCliente.ip = ipCliente;
+            novoCliente.saldo = 100; //Saldo inicial
+            novoCliente.last_req = 0;
+            ClientesDB[ipCliente] = novoCliente;
+            cout << "[Thread] Novo cliente registrado: " << ipCliente << " com saldo inicial R$ " << novoCliente.saldo << endl;
+        }else{
+            cout << "[Thread] Cliente ja registrado: " << ipCliente << endl;
+        }
+    }
+    for(const auto& cliente : ClientesDB){
+        resposta.data.ack.new_balance += cliente.second.saldo;
+    }
     sendto(discoverySocket, &resposta, sizeof(resposta), 0, (struct sockaddr *)&clientAddr, sizeof(clientAddr));
 }
 
 //Geerencia as requisições PIX e envia respostas
-void handle_pix(int serviceSocket, struct sockaddr_in clientAddr, packet_t requisicao){
+void handle_pix(int serviceSocket, struct sockaddr_in clientAddr, packet_t requisicao){    
     packet_t resposta{};
-    resposta.seqn = requisicao.seqn;
-    resposta.type = PACKET_TYPE_REQUEST_ACK;
-    resposta.data.ack.seqn = requisicao.seqn;
-    resposta.data.ack.new_balance = 100000; // mock: e.g., 1000.00 in cents
+    if(requisicao.type == PACKET_TYPE_REQUEST){
+        string ipRemetente = inet_ntoa(clientAddr.sin_addr);
+        struct in_addr addr;
+        addr.s_addr = htonl(requisicao.data.req.dest_addr);
+        string ipDestino = inet_ntoa(addr);
+
+        processarRequisicao(requisicao.data.req.value, ipRemetente, ipDestino);
+
+        // Prepara a resposta
+        resposta.seqn = requisicao.seqn;
+        resposta.type = PACKET_TYPE_REQUEST_ACK;
+        resposta.data.ack.seqn = ClientesDB[ipRemetente].last_req;
+        if(requisicao.data.req.value == 0){
+            resposta.data.ack.new_balance = ClientesDB[ipDestino].saldo;
+        }else{
+            resposta.data.ack.new_balance = ClientesDB[ipRemetente].saldo;
+        }
+        
+    }
+
     std::this_thread::sleep_for(std::chrono::seconds(2));
     sendto(serviceSocket, &resposta, sizeof(resposta), 0, (struct sockaddr *)&clientAddr, sizeof(clientAddr));
     if (requisicao.data.req.dest_addr == 1) {
@@ -104,9 +140,14 @@ int main(int argc, char *argv[]){
     }
     int portaDescoberta = stoi(argv[1]);
 
+    Cliente c1;
+    c1.ip = "192.168.15.20";
+    c1.saldo = 100;
+    c1.last_req = 0;
+    ClientesDB[c1.ip] = c1;
+
     int discoverySocket;
-    struct sockaddr_in infoServico, infoDiscovery, infoCliente;
-    char buffer[TAMANHO_BUFFER];
+    struct sockaddr_in infoDiscovery, infoCliente;
 
     //Configuração dos sockets de descoberta 
     discoverySocket = socket(AF_INET, SOCK_DGRAM, 0);
@@ -115,8 +156,12 @@ int main(int argc, char *argv[]){
     infoDiscovery.sin_port = htons(portaDescoberta);
     bind(discoverySocket,(struct sockaddr *)&infoDiscovery, sizeof(infoDiscovery));
 
-    cout << "[Main] Servidor de Descoberta rodando na porta " << portaDescoberta << endl;
-    cout << "[Main] Servidor PIX aguardando requisicoes na porta " << portaDescoberta << endl;
+    printf("%s num_transactions %d total_transfered %d total_balance %d \n", 
+        timestamp().c_str(), 
+        num_transactions,
+        total_transferred, 
+        total_balance 
+    );
 
     fd_set readfds;
     int max_sd = discoverySocket;
@@ -134,14 +179,24 @@ int main(int argc, char *argv[]){
             ssize_t bytes = recvfrom(discoverySocket, &pacote, sizeof(pacote), 0,(struct sockaddr *)&infoCliente, &len);
             if(bytes >= (ssize_t)sizeof(packet_t)){
                 if (pacote.type == PACKET_TYPE_DISCOVERY) {
+                    cout << "\n--- PACOTE DE DESCOBERTA RECEBIDO ---" << std::endl;
                     struct sockaddr_in clientAddr_copy = infoCliente;
                     thread(handle_discovery, discoverySocket, clientAddr_copy, pacote.seqn).detach();
                 } else if (pacote.type == PACKET_TYPE_REQUEST) {
+                    cout << "\n--- REQUISICAO PIX RECEBIDA ---" << std::endl;
                     struct sockaddr_in clientAddr_copy = infoCliente;
-                    thread(handle_pix, discoverySocket, clientAddr_copy, pacote).detach();
+                    thread t(handle_pix, discoverySocket, clientAddr_copy, pacote);
+                    t.join();    
+                    printf("%s num_transactions %d total_transfered %d total_balance %d \n", 
+                    timestamp().c_str(), 
+                    num_transactions,
+                    total_transferred, 
+                    total_balance 
+                    );
                 }
             }
         }
+        
     }
     close(discoverySocket);
     return 0;
