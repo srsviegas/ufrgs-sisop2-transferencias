@@ -1,3 +1,4 @@
+
 #include <iostream>
 #include <string>
 #include <map>
@@ -13,6 +14,7 @@
 
 #include "../client/request.hpp"
 #include "util.hpp"
+#include <vector>
 
 using namespace std;
 
@@ -22,11 +24,21 @@ struct Cliente {
     int last_req;
 };
 
+struct Transacao {
+    string ipRemetente;
+    string ipDestino;
+    u_int32_t valor;
+    int req_id;
+};
+
+vector<Transacao> historicoTransacoes; //Salva o histórico de transações
+
+//Estatísticas globais
 int num_transactions = 0;
 int total_transferred = 0;
 int total_balance = 0;
 
-map<string, Cliente> ClientesDB; //Banco de dados dos clientes (mudar)
+map<string, Cliente> ClientesDB; //Banco de dados dos clientes
 mutex saldosMutex; //Mutex para proteger o acesso aos dados dos clientes    
 
 void processarRequisicao(u_int32_t value, string ipRemetente, string ipDestino){
@@ -68,6 +80,12 @@ void processarRequisicao(u_int32_t value, string ipRemetente, string ipDestino){
                 total_balance += cliente.second.saldo;
             }
             num_transactions += 1;
+            Transacao t;
+            t.ipRemetente = ipRemetente;
+            t.ipDestino = ipDestino;
+            t.valor = value;
+            t.req_id = ClientesDB[ipRemetente].last_req;
+            historicoTransacoes.push_back(t);
             cout << "[Thread] Transacao processada: " << ipRemetente << " -> " << ipDestino << "(R$ " << value << ")" << endl;
         }
     }    
@@ -188,10 +206,10 @@ int main(int argc, char *argv[]){
                     thread t(handle_pix, discoverySocket, clientAddr_copy, pacote);
                     t.join();    
                     printf("%s num_transactions %d total_transfered %d total_balance %d \n", 
-                    timestamp().c_str(), 
-                    num_transactions,
-                    total_transferred, 
-                    total_balance 
+                        timestamp().c_str(), 
+                        num_transactions,
+                        total_transferred, 
+                        total_balance 
                     );
                 }
             }
