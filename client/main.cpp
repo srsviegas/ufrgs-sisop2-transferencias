@@ -11,6 +11,7 @@
 #include "discovery.hpp"
 #include "util.hpp"
 
+#define PORTA_PIX 9999
 
 int main(int argc, char* argv[]) {
     if (argc != 2) {
@@ -84,7 +85,7 @@ int main(int argc, char* argv[]) {
             }
 
             request_ack ack{};
-            if (send_request_with_retry(request_socket, server_ip, server_port, req, ack)) {
+            if (send_request_with_retry(request_socket, server_ip, PORTA_PIX, req, ack)) {
                 char dest_ip_str[INET_ADDRSTRLEN];
                 uint32_t dest_ip_network = htonl(req.dest_addr);
                 inet_ntop(AF_INET, &dest_ip_network, dest_ip_str, INET_ADDRSTRLEN);
@@ -109,7 +110,7 @@ int main(int argc, char* argv[]) {
     queue_cv.notify_all();
     request_thread.join();
 
-    send_exit_request(request_socket, server_ip, server_port);
+    send_exit_request(request_socket, server_ip, PORTA_PIX);
 
     close(request_socket);
 
