@@ -76,6 +76,7 @@ void processarRequisicao(u_int32_t value, string ipRemetente, string ipDestino){
             ClientesDB[ipDestino].saldo += value;
             ClientesDB[ipRemetente].last_req += 1;
             total_transferred += value;
+            total_balance = 0;
             for(const auto& cliente : ClientesDB){
                 total_balance += cliente.second.saldo;
             }
