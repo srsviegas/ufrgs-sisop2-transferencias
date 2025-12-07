@@ -62,5 +62,7 @@
         "span": "cpp",
         "variant": "cpp",
         "txt": "cpp"
-    }
+    },
+    "C_Cpp.errorSquiggles": "disabled",
+    "makefile.configureOnOpen": true
 }
