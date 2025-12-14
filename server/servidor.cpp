@@ -20,7 +20,6 @@ int main(int argc, char *argv[]) {
 
     Server server;
 
-    // 🔹 1. Cria UM ÚNICO socket UDP
     int discoverySocket = socket(AF_INET, SOCK_DGRAM, 0);
     if (discoverySocket < 0) {
         cerr << "Erro ao criar socket UDP" << endl;
@@ -37,7 +36,6 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // 🔥 2. Discovery acontece COM SOCKET JÁ BINDADO
     server.descobrirOutrosServidores(discoverySocket, portaDescoberta);
 
     server.imprimirStatus();
@@ -73,7 +71,7 @@ int main(int argc, char *argv[]) {
                 // 🔹 Responde ACK do primário
                 if (server.isPrimary()) {
                     packet_t resp{};
-                    resp.type = PACKET_TYPE_SERVER_ACK; // ✅ corrigido
+                    resp.type = PACKET_TYPE_SERVER_ACK; 
                     resp.seqn = server.getID();
                     sendto(discoverySocket, &resp, sizeof(resp), 0,
                         (sockaddr*)&infoCliente, sizeof(infoCliente));
@@ -88,7 +86,6 @@ int main(int argc, char *argv[]) {
 
             else if (pacote.type == PACKET_TYPE_CLIENT_DISCOVERY) {
 
-                // 🔒 BACKUP NÃO responde cliente
                 if (!server.isPrimary()) {
                     cout << "[Backup] Ignorando discovery de cliente\n";
                     continue;
@@ -108,7 +105,7 @@ int main(int argc, char *argv[]) {
                         discoverySocket, 
                         infoCliente, 
                         resposta.seqn,
-                        PACKET_TYPE_CLIENT_DISCOVERY  // ✅ aqui
+                        PACKET_TYPE_CLIENT_DISCOVERY
                     );
                 }).detach();
 
